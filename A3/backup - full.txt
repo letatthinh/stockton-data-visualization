@@ -1,0 +1,305 @@
+---
+title: "Electric vehicles in Washington"
+author: "Thinh Le"
+date: "`2024-Oct-11`"
+output: 
+  flexdashboard::flex_dashboard:
+    # Row layout
+    orientation: rows
+# Add shiny components into flex dashboard
+# https://pkgs.rstudio.com/flexdashboard/articles/shiny.html#getting-started
+runtime: shiny 
+---
+
+```{r, include=FALSE}
+# General notes:
+#   + Data source: https://www.kaggle.com/datasets/ironwolf404/electric-vehicle-population-in-usa
+#   + The data has been modified to be simpler.
+```
+
+```{r setup, include=FALSE}
+# Load libraries
+library(flexdashboard)
+library(shiny)
+library(dplyr)
+# For visualizing maps in R
+library(plotly)
+# For working with JSON, in this case GeoJSON
+library(rjson)
+```
+
+```{r global}
+# Load electric vehicles
+ev_df <- read.csv("electric-vehicles-in-washington.csv")
+
+# Load Washington's counties GeoJSON
+washington_counties_geo_json <- fromJSON(file="geojson-counties-fips.json")
+
+# Colors
+cyan_50 <- "#ecfeff"
+cyan_100 <- "#cffafe"
+cyan_200 <- "#a5f3fc"
+cyan_300 <- "#67e8f9"
+cyan_400 <- "#22d3ee"
+cyan_500 <- "#06b6d4"
+cyan_600 <- "#0891b2"
+cyan_900 <- "#164e63"
+cyan_950 <- "#083344"
+
+# Year range
+min_model_year <- min(ev_df$Model_Year)
+max_model_year <- max(ev_df$Model_Year)
+```
+
+## Sidebar {.sidebar}
+
+```{r}
+# Year range
+sliderInput(
+  # ID
+  "year_range",
+  # Label for the input
+  label = "Select year range:",
+  # Minimum year
+  min = min_model_year,
+  # Maximum year
+  max = max_model_year,
+  # Default range
+  value = c(1997, 2024),
+  # Step: 1 year, to prevent decimal numbers
+  step = 1,    
+  # Remove thousand separators in the year
+  sep = ""
+)
+
+ev_by_positive_electric_range <- ev_df %>%
+    filter(Electric_Range > 0)
+
+# Manufacturer
+selectInput(
+  "manufacturer", 
+  label = "Select manufacturer:", 
+  choices = unique(ev_by_positive_electric_range$Manufacturer),
+  selected = "BMW"
+)
+
+get_ev_df_by_model_year_df <- reactive({
+  ev_by_positive_electric_range %>%
+    filter(
+      input$year_range[1] <= Model_Year,
+      Model_Year <= input$year_range[2]
+    )
+})
+
+get_ev_df_by_model_year_and_manufacturer <- reactive({
+  get_ev_df_by_model_year_df() %>%
+    filter(
+      Manufacturer == input$manufacturer
+    )
+})
+```
+
+
+## Row 1
+
+### **Average Electric Range (in miles) of Electric Vehicles by Model**
+
+```{r}
+renderPlot({
+  average_electric_range <- get_ev_df_by_model_year_and_manufacturer() %>%
+    filter(
+      Electric_Range > 0
+    ) %>%
+    group_by(Model, EV_Type) %>%
+    summarise(Average_Electric_Range = round(mean(Electric_Range), digits = 2))
+  
+  ggplot(
+    average_electric_range,
+    aes(x = Model, y = Average_Electric_Range, fill = EV_Type)
+  ) +
+  geom_bar(
+    stat = "identity"
+  ) +
+  geom_text(
+    aes(label = Average_Electric_Range),
+    hjust = 0.5,
+    position = position_stack(vjust = 0.5),
+    fontface = "bold",
+    size = 5,
+    color = cyan_50
+  ) +
+  scale_fill_manual(
+    values = c("BEV" = cyan_950, "PHEV" = cyan_500),
+    labels = c(
+      "BEV" = "Battery",
+      "PHEV" = "Plug-in Hybrid"
+    )
+  ) +
+  labs(
+    fill = "Type"
+  ) +
+  theme_classic() +
+  theme(
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.title = element_blank(),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks = element_blank()
+  )
+})
+
+```
+
+
+## Row 2
+
+### **Clean Alternative Fuel Vehicle (CAFV) Rate**
+
+```{r}
+renderPlot({
+  ev_by_cafv <- get_ev_df_by_model_year_and_manufacturer() %>%
+    group_by(CAFV) %>%
+    summarise(Count = n())
+  
+  total_cafv <- sum(ev_by_cafv$Count)
+  ev_by_cafv$Rate <- round(ev_by_cafv$Count / total_cafv * 100, digits = 2)
+  
+  middle_number_of_cafv <- max(ev_by_cafv$Count) / 2
+  
+  ggplot(
+    ev_by_cafv,
+    aes(x = "", y = Count, fill = CAFV)
+  ) +
+  geom_bar(stat = "identity", width=1) +
+  # Convert the bar chart into a pie chart
+  coord_polar(theta = "y") +
+  # Add rate in the corresponding area
+  geom_text(
+    aes(
+      label = paste0(Count, "\n", Rate, "%")
+    ),
+    position = position_stack(vjust = 0.5),
+    fontface = "bold",
+    size = 5
+  ) +
+  scale_fill_manual(values = c(
+    "known" = cyan_200,
+    "not eligible" = "#f1f5f9",
+    "unknown" = "#ffedd5")
+  ) +
+  theme_classic() +
+  theme(
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    axis.line = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+})
+```
+
+_Note: Clean Alternative Fuel Vehicle (CAFV) Eligibility Indicates whether the vehicle qualifies as a clean alternative fuel vehicle under specific criteria._
+
+### **Distribution of Electric Vehicles Across Washington by County**
+
+```{r}
+renderPlotly({
+  # Unique FIPS codes
+  unique_fips_code_and_county <- ev_df %>%
+    distinct(FIPS_Code, County)
+
+  # Group the data by FIPS code and County
+  ev_grouped_by_year_range_df <- get_ev_df_by_model_year_and_manufacturer() %>%
+    group_by(FIPS_Code, County) %>%
+    summarise(Count = n())
+
+  # This ensure the map show the counties despite their Count is zero
+  ev_by_fips_code_and_county_df <- unique_fips_code_and_county %>%
+    left_join(ev_grouped_by_year_range_df, by = "FIPS_Code") %>%
+    mutate(Count = ifelse(is.na(Count), 0, Count))
+
+  ev_by_fips_code_and_county_df %>%
+    plot_ly() %>%
+    # Build the map
+    add_trace(
+      # Create a choropleth map
+      # https://plotly.com/r/choropleth-maps/#choropleth-map-using-geojson
+      type="choropleth",
+      # Draw counties by Geo JSON
+      geojson=washington_counties_geo_json,
+      z = ~Count,
+      locations = ~FIPS_Code,
+      color     = ~Count,
+      # The display text when hover mouse on a county
+      text      = ~paste0(
+          "FIPS code: ", FIPS_Code, "<br>",
+          "County: ", County.x, "<br>",
+          "Number of electric vehicles: ", Count
+        ),
+      # Scale by the percentage of Count
+      colorscale = list(
+        # Low level
+        c(0, "white"),
+        c(0.5, cyan_500),
+        c(0.5, cyan_500),
+        c(0.5, cyan_500),
+        c(1, cyan_950)
+      )
+    ) %>%
+    add_trace(
+      type = "choropleth",
+      geojson = washington_counties_geo_json,  # Same GeoJSON file
+      locations = ~FIPS_Code,         # Use FIPS codes
+      z = NA,                         # Set color to NA for counties without data
+      showscale = FALSE,              # No color scale for this layer
+      marker = list(line = list(width = 1, color = 'black'))  # Add boundary lines
+    ) %>%
+    # https://plotly.com/r/reference/layout/geo
+    layout(
+      geo = list(
+        # Show USA instead of the world map
+        scope      = "usa",
+        # This projection is ideal when you want to map data across the states,
+        # and you want to keep the relative area of the states accurate.
+        projection = list(type = "albers usa"),
+        # Center coordinates of Washington state
+        center = list(lon = -120.9, lat = 47.25),
+        # Focus the map on counties in Washington state only
+        fitbounds = "locations",
+        # Hide the lakes and rivers
+        showlakes  = FALSE,
+        showrivers = FALSE,
+        showcountries = TRUE,
+        # Set latitude range to zoom into Washington state
+        lataxis = list(range = c(45.5, 49)),
+        # Set longitude range to zoom into Washington state
+        lonaxis = list(range = c(-124.8, -117))
+      )
+    ) %>%
+    # Colorbar title
+    colorbar(title = "Units") %>%
+    # https://plotly.com/r/reference/layout/#layout-title
+    layout(title = list(
+        # Make the title bold using HTML
+        text = "<b>Distribution of Electric Vehicles Across Washington by County<b>",
+        # Modify the title font
+        font = list(
+          family = "Arial",
+          size = 15,
+          color = cyan_900
+        ),
+        # Center the title horizontally
+        x = 0.5,
+        # Set the anchor point to the center
+        xanchor = "center",
+        # Align the title close to the top
+        y = 0.95
+      )
+    )
+})
+```
